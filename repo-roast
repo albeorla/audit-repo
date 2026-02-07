@@ -1,0 +1,426 @@
+#!/usr/bin/env python3
+"""
+Puts a GitHub repo on a spit and slowly rotates it over an open flame.
+
+Usage:
+  repo-roast owner/repo
+  repo-roast https://github.com/owner/repo
+  repo-roast owner/repo --model sonnet
+"""
+
+import argparse
+import asyncio
+import base64
+import json
+import re
+import subprocess
+import sys
+from datetime import datetime, timezone
+
+try:
+    from rich.console import Console, Group
+    from rich.live import Live
+    from rich.markdown import Markdown
+    from rich.panel import Panel
+    from rich.text import Text
+    from rich.table import Table
+except ImportError:
+    print("Missing dependency: rich\nInstall: pip install rich")
+    sys.exit(1)
+
+console = Console()
+
+
+def check_dependency(cmd):
+    """Verify a CLI tool is installed."""
+    try:
+        subprocess.run([cmd, "--version"], capture_output=True, timeout=10)
+        return True
+    except FileNotFoundError:
+        return False
+
+
+def parse_repo(arg):
+    """Extract owner/repo from URL or direct reference."""
+    m = re.match(r"https?://github\.com/([^/]+/[^/]+?)(?:/.*)?$", arg)
+    if m:
+        return m.group(1).rstrip("/")
+    if re.match(r"^[^/]+/[^/]+$", arg):
+        return arg
+    return None
+
+
+async def gh(endpoint):
+    """Single GitHub API call via gh CLI."""
+    proc = await asyncio.create_subprocess_exec(
+        "gh", "api", endpoint,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, _ = await proc.communicate()
+    if proc.returncode != 0:
+        return None
+    text = stdout.decode()
+    return json.loads(text) if text.strip() else None
+
+
+async def gh_list(endpoint):
+    """Paginated GitHub API call via gh CLI."""
+    proc = await asyncio.create_subprocess_exec(
+        "gh", "api", "--paginate", "--jq", ".[]", endpoint,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, _ = await proc.communicate()
+    if proc.returncode != 0:
+        return []
+    text = stdout.decode().strip()
+    if not text:
+        return []
+    items = []
+    for line in text.split("\n"):
+        line = line.strip()
+        if line:
+            try:
+                items.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return items
+
+
+async def fetch_all(repo_name):
+    """Fetch all repo data concurrently."""
+    data = {"errors": []}
+
+    repo = await gh(f"/repos/{repo_name}")
+    if not repo:
+        return None
+    data["repo"] = repo
+
+    default_branch = repo.get("default_branch", "main")
+
+    results = await asyncio.gather(
+        gh(f"/repos/{repo_name}/languages"),
+        gh_list(f"/repos/{repo_name}/contributors?per_page=100&anon=true"),
+        gh_list(f"/repos/{repo_name}/releases?per_page=5"),
+        gh(f"/repos/{repo_name}/stats/participation"),
+        gh_list(f"/repos/{repo_name}/commits?per_page=30"),
+        gh(f"/repos/{repo_name}/community/profile"),
+        gh(f"/repos/{repo_name}/git/trees/{default_branch}"),
+        gh(f"/repos/{repo_name}/readme"),
+    )
+
+    languages, contribs, releases, participation, recent_commits, community, tree, readme_resp = results
+
+    if languages is None:
+        data["errors"].append("languages")
+    data["languages"] = languages or {}
+    data["contributors"] = contribs or []
+    data["releases"] = releases or []
+    data["participation"] = participation
+    data["recent_commits"] = recent_commits or []
+    data["community"] = community
+    data["tree"] = tree
+
+    if readme_resp and "content" in readme_resp:
+        content = readme_resp["content"].replace("\n", "")
+        data["readme"] = base64.b64decode(content).decode("utf-8", errors="replace")
+    else:
+        data["readme"] = None
+
+    return data
+
+
+async def claude_analyze(prompt, model="opus", timeout=180):
+    """Send prompt to claude CLI, return text response."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "claude", "-p", "--model", model, "--output-format", "json",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(
+            proc.communicate(input=prompt.encode()), timeout=timeout
+        )
+    except asyncio.TimeoutError:
+        return None
+    if proc.returncode != 0:
+        return None
+    text = stdout.decode()
+    try:
+        output = json.loads(text)
+        return output.get("result", text) if isinstance(output, dict) else text
+    except json.JSONDecodeError:
+        return text
+
+
+def print_metrics(data):
+    """Print metrics as a Rich table in a panel."""
+    repo = data["repo"]
+    languages = data["languages"]
+    now = datetime.now(timezone.utc)
+    pushed = datetime.fromisoformat(repo["pushed_at"].replace("Z", "+00:00"))
+    created = datetime.fromisoformat(repo["created_at"].replace("Z", "+00:00"))
+    age_days = (now - created).days
+    push_days = (now - pushed).days
+
+    total_bytes = sum(languages.values()) if languages else 0
+    lang_breakdown = "none"
+    if languages and total_bytes > 0:
+        lang_breakdown = ", ".join(
+            f"{k} {v * 100 / total_bytes:.1f}%"
+            for k, v in sorted(languages.items(), key=lambda x: -x[1])
+        )
+
+    license_id = "none"
+    if repo.get("license") and isinstance(repo["license"], dict):
+        license_id = repo["license"].get("spdx_id", "none")
+
+    contrib_count = len(data["contributors"])
+    release_count = len(data["releases"])
+
+    commit_note = f"{len(data['recent_commits'])} in last 30 fetched"
+    if data["participation"]:
+        yearly = sum(data["participation"].get("all", []))
+        commit_note = f"~{yearly} in past year"
+
+    community = data.get("community")
+    health_pct = f"{community.get('health_percentage', '?')}%" if community else "?"
+
+    table = Table.grid(padding=(0, 2))
+    table.add_column(style="bold cyan", justify="right", min_width=14)
+    table.add_column(min_width=18)
+    table.add_column(style="bold cyan", justify="right", min_width=14)
+    table.add_column(min_width=18)
+
+    rows = [
+        ("Stars", str(repo.get("stargazers_count", 0))),
+        ("Forks", str(repo.get("forks_count", 0))),
+        ("Watchers", str(repo.get("subscribers_count", 0))),
+        ("Contributors", str(contrib_count)),
+        ("Open issues", str(repo.get("open_issues_count", 0))),
+        ("Commits", commit_note),
+        ("Created", f"{repo['created_at'][:10]}"),
+        ("Last push", f"{repo['pushed_at'][:10]}"),
+        ("Size", f"{repo.get('size', 0)} KB"),
+        ("License", license_id),
+        ("Releases", str(release_count)),
+        ("Archived", str(repo.get("archived", False))),
+        ("Health", health_pct)
+    ]
+
+    for i in range(0, len(rows), 2):
+        r1 = rows[i]
+        if i + 1 < len(rows):
+            r2 = rows[i+1]
+            table.add_row(r1[0], r1[1], r2[0], r2[1])
+        else:
+            table.add_row(r1[0], r1[1], "", "")
+
+    # Group table and extra info
+    elements = [table]
+    if lang_breakdown != "none":
+        elements.append(Text(f"\nLanguages: {lang_breakdown}", style="dim"))
+    if repo.get("topics"):
+        elements.append(Text(f"Topics: {', '.join(repo.get('topics', []))}", style="dim"))
+
+    console.print(Panel(Group(*elements), title="[bold]Metrics[/bold]", border_style="dim", safe_box=True))
+
+    if data["errors"]:
+        console.print(f"  [dim yellow]Fetch warnings: {', '.join(data['errors'])}[/dim yellow]")
+
+
+def build_prompt(data):
+    """Build the LLM analysis prompt from raw data."""
+    repo = data["repo"]
+    languages = data["languages"]
+    now = datetime.now(timezone.utc)
+    pushed = datetime.fromisoformat(repo["pushed_at"].replace("Z", "+00:00"))
+    created = datetime.fromisoformat(repo["created_at"].replace("Z", "+00:00"))
+
+    total_bytes = sum(languages.values()) if languages else 0
+    lang_breakdown = ""
+    if languages and total_bytes > 0:
+        lang_breakdown = ", ".join(
+            f"{k} {v * 100 / total_bytes:.1f}%"
+            for k, v in sorted(languages.items(), key=lambda x: -x[1])
+        )
+
+    license_id = "none"
+    if repo.get("license") and isinstance(repo["license"], dict):
+        license_id = repo["license"].get("spdx_id", "none")
+
+    # Commit activity summary
+    commit_info = "unknown"
+    if data["participation"]:
+        weekly = data["participation"].get("all", [])
+        yearly = sum(weekly)
+        recent_12w = sum(weekly[-12:]) if len(weekly) >= 12 else sum(weekly)
+        commit_info = f"~{yearly} in past year, ~{recent_12w} in last 12 weeks"
+
+    # Recent commit authors
+    author_counts = {}
+    for c in data["recent_commits"][:20]:
+        author = c.get("author", {})
+        login = author.get("login", "unknown") if author else "unknown"
+        author_counts[login] = author_counts.get(login, 0) + 1
+    top_authors = ", ".join(
+        f"{k} ({v})" for k, v in
+        sorted(author_counts.items(), key=lambda x: -x[1])[:5]
+    )
+
+    # Release info
+    release_info = "none"
+    if data["releases"]:
+        names = [r.get("tag_name", "?") for r in data["releases"][:5]]
+        latest_date = data["releases"][0].get("published_at", "?")[:10] if data["releases"] else "?"
+        release_info = f"{len(data['releases'])} releases, latest: {names[0]} ({latest_date}), recent tags: {', '.join(names)}"
+
+    # Community profile
+    community_info = "unknown"
+    if data["community"]:
+        files = data["community"].get("files", {})
+        present = [k for k, v in files.items() if v]
+        community_info = f"health {data['community'].get('health_percentage', '?')}%, has: {', '.join(present) or 'nothing'}"
+
+    # File tree (top-level)
+    tree_info = "unavailable"
+    if data["tree"] and "tree" in data["tree"]:
+        entries = data["tree"]["tree"]
+        dirs = [e["path"] for e in entries if e["type"] == "tree"]
+        files = [e["path"] for e in entries if e["type"] == "blob"]
+        tree_info = f"Directories: {', '.join(dirs[:20])}\nFiles: {', '.join(files[:20])}"
+        if len(dirs) > 20 or len(files) > 20:
+            tree_info += f"\n(truncated, {len(dirs)} dirs and {len(files)} files total)"
+
+    # README
+    readme_section = "No README available."
+    if data["readme"]:
+        readme_text = data["readme"]
+        total_len = len(readme_text)
+        max_len = 4000
+        if total_len > max_len:
+            readme_text = readme_text[:max_len]
+            readme_section = f"README (truncated to {max_len} of {total_len} chars):\n{readme_text}"
+        else:
+            readme_section = f"README ({total_len} chars):\n{readme_text}"
+
+    prompt = (
+        "You are a sharp-tongued GitHub repo critic. Your reviews are honest, "
+        "concise, and occasionally devastating. Interpret the data — don't parrot "
+        "numbers back. Be substantive, not mean for the sake of it.\n\n"
+        "Sections (keep each to 2-4 sentences):\n"
+        "## The Numbers\nWhat the stats actually reveal in context. Compare to "
+        "what you'd expect for a project of this type and age.\n\n"
+        "## Red Flags\nConcerning patterns: buzzword density vs substance, "
+        "unsubstantiated claims, marketing-to-code ratio, misleading scope, "
+        "abandoned maintenance. Say 'None found' if genuinely clean.\n\n"
+        "## What It Actually Is\nCut through any marketing to describe what this "
+        "project really does and how it works.\n\n"
+        "## Verdict\nOne sentence. Make it count.\n\n"
+        "---\n"
+        f"Repo: {repo.get('full_name', '?')}\n"
+        f"Description: {repo.get('description', 'none')}\n"
+        f"Stars: {repo.get('stargazers_count', 0)} | "
+        f"Forks: {repo.get('forks_count', 0)} | "
+        f"Watchers: {repo.get('subscribers_count', 0)}\n"
+        f"Contributors: {len(data['contributors'])}\n"
+        f"Open issues (includes PRs): {repo.get('open_issues_count', 0)}\n"
+        f"Age: {(now - created).days} days | "
+        f"Last push: {(now - pushed).days} days ago\n"
+        f"Commits: {commit_info}\n"
+        f"Recent commit authors: {top_authors or 'unknown'}\n"
+        f"Languages: {lang_breakdown or 'none'}\n"
+        f"License: {license_id}\n"
+        f"Releases: {release_info}\n"
+        f"Community: {community_info}\n"
+        f"Archived: {repo.get('archived', False)}\n\n"
+        f"Top-level file tree:\n{tree_info}\n\n"
+        f"{readme_section}"
+    )
+    return prompt
+
+
+async def main():
+    p = argparse.ArgumentParser(
+        description="Roasts GitHub repos with data and LLM analysis",
+        usage="repo-roast <owner/repo | github-url> [options]",
+    )
+    p.add_argument("repo", help="owner/repo or GitHub URL")
+    p.add_argument("--model", default="opus", help="Claude model (default: opus)")
+    p.add_argument("--no-llm", action="store_true", help="Metrics only, skip LLM analysis")
+    p.add_argument("--json", action="store_true", help="Raw JSON output")
+    args = p.parse_args()
+
+    if not check_dependency("gh"):
+        console.print("[red]Error:[/red] gh CLI not found. Install from https://cli.github.com/")
+        sys.exit(1)
+    if not args.no_llm and not check_dependency("claude"):
+        console.print("[red]Error:[/red] claude CLI not found. Install from https://docs.anthropic.com/en/docs/claude-code")
+        sys.exit(1)
+
+    repo_name = parse_repo(args.repo)
+    if not repo_name:
+        console.print(f"[red]Error:[/red] can't parse '{args.repo}' — use owner/repo or a GitHub URL")
+        sys.exit(1)
+
+    console.print(f"\n[bold red]:fire: Roasting[/bold red] [bold]{repo_name}[/bold]\n")
+
+    # Fetch (all API calls run concurrently)
+    with console.status("[dim]Gathering data...[/dim]", spinner="simpleDots"):
+        data = await fetch_all(repo_name)
+    if not data:
+        console.print(f"[red]Error:[/red] could not fetch {repo_name} (not found or no access)")
+        sys.exit(1)
+
+    # JSON output mode
+    if args.json:
+        out = {
+            "repo": data["repo"],
+            "languages": data["languages"],
+            "contributors": len(data["contributors"]),
+            "releases": len(data["releases"]),
+            "errors": data["errors"],
+        }
+        print(json.dumps(out, indent=2))
+        return
+
+    print_metrics(data)
+
+    if args.no_llm:
+        console.print("\n[bold red]:fire: Roasted.[/bold red]\n")
+        return
+
+    # LLM analysis
+    with console.status(f"[dim]Claude ({args.model}) is thinking...[/dim]", spinner="simpleDots"):
+        prompt = build_prompt(data)
+        result = await claude_analyze(prompt, model=args.model, timeout=180)
+
+    if result:
+        console.print()
+        
+        # Slow scroll effect
+        lines = result.strip().splitlines()
+        current_content = ""
+        with Live(console=console, refresh_per_second=20) as live:
+            for line in lines:
+                current_content += line + "\n"
+                live.update(Panel(
+                    Markdown(current_content),
+                    title=f"[bold]The Roast[/bold] [dim]({args.model})[/dim]",
+                    border_style="red",
+                    safe_box=True,
+                ))
+                await asyncio.sleep(0.08)  # Slow scroll pace
+
+        console.print("\n[bold red]:fire: Roasted.[/bold red]\n")
+        # Hold on the ending for 5 seconds (useful for asciinema recordings)
+        await asyncio.sleep(5)
+    else:
+        console.print("[red]Error:[/red] claude did not return a response")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
