@@ -1,0 +1,90 @@
+
+🔥 Roasting rahulnyk/knowledge_graph
+
+╭────────────────────────────────── Metrics ───────────────────────────────────╮
+│          Stars  2483                         Forks  422                      │
+│       Watchers  31                    Contributors  4                        │
+│    Open issues  19                         Commits  ~2 in past year          │
+│        Created  2023-10-22               Last push  2025-05-15               │
+│           Size  37374 KB                   License  none                     │
+│       Releases  0                         Archived  False                    │
+│         Health  28%                                                          │
+│                                                                              │
+│ Languages: Jupyter Notebook 90.4%, Python 9.6%                               │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+╭────────────────────────────── The Roast (opus) ──────────────────────────────╮
+│ Project Vitals                                                               │
+│                                                                              │
+│ Sustainability: This is a single-author project in all but name — rahulnyk   │
+│ authored 85% of commits, with 3 other contributors providing only 1 commit   │
+│ each. The project is effectively stalled: 1 of 52 weeks active in the past   │
+│ year, zero commits in the last 12 weeks, and last push 268 days ago. With no │
+│ license, no releases, and a bus factor of 1, this project has no sustainable │
+│ future without its sole maintainer re-engaging.                              │
+│                                                                              │
+│ Traction: 2,483 stars and 422 forks are strong numbers for an 839-day-old    │
+│ tutorial-style project, reflecting the wave of interest in knowledge graphs  │
+│ and RAG during 2024. The 31 watchers against 2,483 stars (1.2% ratio)        │
+│ suggests viral/social-media-driven discovery rather than deep ongoing        │
+│ interest — people starred and moved on. The fork-to-star ratio of 17% is     │
+│ typical for educational repos people clone to experiment with.               │
+│                                                                              │
+│ Maturity: No license, no releases, no versioning, and a community health     │
+│ score of 28% — this is a personal experiment that went viral, not a          │
+│ maintained project. The absence of a license is particularly notable:        │
+│ technically, no one has legal permission to use, modify, or distribute this  │
+│ code.                                                                        │
+│                                                                              │
+│ Technical Assessment                                                         │
+│                                                                              │
+│ The repository is a Jupyter notebook prototype (90.4% notebook, 9.6%         │
+│ Python), not a software project. The core deliverable is a single notebook   │
+│ (extract_graph.ipynb) that chains text chunking, LLM-based concept           │
+│ extraction via Ollama/Mistral, and graph construction — a straightforward    │
+│ pipeline with no tests, no package structure, and no API. The presence of    │
+│ pyproject.toml, poetry.lock, environment.yml, and a dockerfile shows some    │
+│ environment discipline, but the .github directory and detected CI/CD likely  │
+│ amount to minimal configuration rather than a real test/build pipeline. The  │
+│ README is substantive and educational — it explains what knowledge graphs    │
+│ are, outlines the method with a flowchart, and sets honest expectations      │
+│ about the approach (local LLM, no GPT dependency). There is no hype          │
+│ detected, and the claims are proportional to what a single notebook can      │
+│ deliver. The old_notebooks directory and ner.ipynb suggest iterative         │
+│ experimentation rather than engineered software.                             │
+│                                                                              │
+│ Risk Assessment                                                              │
+│                                                                              │
+│ Maintenance: With zero activity in 3+ months, 19 open issues, and a single   │
+│ maintainer who has disengaged, adoption risk is high. Anyone building on     │
+│ this will immediately become their own maintainer.                           │
+│                                                                              │
+│ Credibility: The README is honest about scope — this is a demonstration, not │
+│ a production system. No inflated claims detected. The project does what it   │
+│ says: converts text to a knowledge graph using a local LLM.                  │
+│                                                                              │
+│ Operational: The missing license is a blocking legal risk — forks and        │
+│ derivative works have no explicit permission grant. No versioned releases    │
+│ means no stability contract. Anyone integrating this must pin to a specific  │
+│ commit and accept that upstream is effectively dead.                         │
+│                                                                              │
+│ Functional Summary                                                           │
+│                                                                              │
+│ This project provides a Jupyter notebook pipeline that splits a PDF corpus   │
+│ into text chunks, extracts concepts and semantic relationships from each     │
+│ chunk using a locally-hosted Mistral 7B model via Ollama, and constructs a   │
+│ knowledge graph where nodes are concepts and edges represent either          │
+│ LLM-extracted relationships or contextual co-occurrence within chunks. The   │
+│ graph is visualized using Python graph libraries (NetworkX/pyvis) and        │
+│ exported as an interactive HTML page. It is a proof-of-concept for Graph     │
+│ Retrieval Augmented Generation (GRAG) that runs entirely on local hardware   │
+│ with no external API costs.                                                  │
+│                                                                              │
+│ Verdict                                                                      │
+│                                                                              │
+│ A well-explained educational notebook that earned its stars as a timely      │
+│ RAG-era tutorial, but the absence of a license, tests, releases, and any     │
+│ recent activity makes it a reference to learn from rather than a dependency  │
+│ to build on.                                                                 │
+╰──────────────────────────────────────────────────────────────────────────────╯
+🔥 Roasted.
