@@ -251,13 +251,28 @@ def build_prompt(data):
     if repo.get("license") and isinstance(repo["license"], dict):
         license_id = repo["license"].get("spdx_id", "none")
 
-    # Commit activity summary
+    # Commit activity & cadence
     commit_info = "unknown"
+    cadence_note = "insufficient data"
     if data["participation"]:
         weekly = data["participation"].get("all", [])
         yearly = sum(weekly)
         recent_12w = sum(weekly[-12:]) if len(weekly) >= 12 else sum(weekly)
         commit_info = f"~{yearly} in past year, ~{recent_12w} in last 12 weeks"
+        if weekly:
+            active_weeks = sum(1 for w in weekly if w > 0)
+            prior_12w = sum(weekly[-24:-12]) if len(weekly) >= 24 else 0
+            cadence_note = (
+                f"{active_weeks}/{len(weekly)} weeks active; "
+                f"{recent_12w} commits in last 12 weeks"
+            )
+            if prior_12w > 0:
+                trend = "stable"
+                if recent_12w > prior_12w * 1.25:
+                    trend = "accelerating"
+                elif recent_12w < prior_12w * 0.75:
+                    trend = "decelerating"
+                cadence_note += f" vs {prior_12w} in prior 12 ({trend})"
 
     # Recent commit authors
     author_counts = {}
@@ -269,6 +284,18 @@ def build_prompt(data):
         f"{k} ({v})" for k, v in
         sorted(author_counts.items(), key=lambda x: -x[1])[:5]
     )
+
+    # Bus factor
+    bus_factor_note = "insufficient data"
+    if author_counts:
+        total_recent = sum(author_counts.values())
+        top_author = max(author_counts.items(), key=lambda x: x[1])
+        top_pct = top_author[1] / total_recent * 100
+        bus_factor_note = (
+            f"Top contributor ({top_author[0]}) authored {top_pct:.0f}% "
+            f"of last {total_recent} sampled commits; "
+            f"{len(author_counts)} distinct authors"
+        )
 
     # Release info
     release_info = "none"
@@ -294,6 +321,28 @@ def build_prompt(data):
         if len(dirs) > 20 or len(files) > 20:
             tree_info += f"\n(truncated, {len(dirs)} dirs and {len(files)} files total)"
 
+    # Structural signals from file tree
+    structure_signals = []
+    if data["tree"] and "tree" in data["tree"]:
+        entries = data["tree"]["tree"]
+        dir_names = {e["path"].lower() for e in entries if e["type"] == "tree"}
+        file_names = {e["path"].lower() for e in entries if e["type"] == "blob"}
+        has_tests = bool(dir_names & {"tests", "test", "__tests__", "spec", "specs"})
+        has_ci = bool(dir_names & {".github", ".circleci"}) or bool(
+            file_names & {".travis.yml", "jenkinsfile", ".gitlab-ci.yml", "azure-pipelines.yml"}
+        )
+        has_docs = bool(dir_names & {"docs", "doc", "documentation"})
+        has_docker = any(
+            f.startswith("dockerfile") or f in ("docker-compose.yml", "docker-compose.yaml")
+            for f in file_names
+        )
+        structure_signals = [
+            f"Tests: {'present' if has_tests else 'not detected'}",
+            f"CI/CD: {'present' if has_ci else 'not detected'}",
+            f"Docs directory: {'present' if has_docs else 'not detected'}",
+            f"Containerization: {'present' if has_docker else 'not detected'}",
+        ]
+
     # README
     readme_section = "No README available."
     if data["readme"]:
@@ -306,20 +355,82 @@ def build_prompt(data):
         else:
             readme_section = f"README ({total_len} chars):\n{readme_text}"
 
+    # README hype term analysis
+    buzzword_note = "no README to analyze"
+    if data["readme"]:
+        readme_lower = data["readme"].lower()
+        hype_terms = [
+            "revolutionary", "groundbreaking", "cutting-edge", "state-of-the-art",
+            "enterprise-grade", "production-ready", "blazing fast", "next-generation",
+            "game-changing", "world-class", "best-in-class", "industry-leading",
+            "paradigm shift", "disruptive", "democratize", "empower",
+            "turnkey", "mission-critical", "battle-tested", "seamless",
+            "zero-config", "drop-in replacement", "superhuman",
+            "10x", "100x", "1000x", "magic", "automagic", "effortless",
+            "no-brainer",
+        ]
+        found = {}
+        for term in hype_terms:
+            count = readme_lower.count(term)
+            if count:
+                found[term] = count
+        total_found = sum(found.values())
+        if found:
+            top_terms = ", ".join(
+                f'"{t}" ({c})' for t, c in
+                sorted(found.items(), key=lambda x: -x[1])[:8]
+            )
+            buzzword_note = f"{total_found} hype terms detected: {top_terms}"
+        else:
+            buzzword_note = "0 hype terms detected"
+
     prompt = (
-        "You are a sharp-tongued GitHub repo critic. Your reviews are honest, "
-        "concise, and occasionally devastating. Interpret the data — don't parrot "
-        "numbers back. Be substantive, not mean for the sake of it.\n\n"
-        "Sections (keep each to 2-4 sentences):\n"
-        "## The Numbers\nWhat the stats actually reveal in context. Compare to "
-        "what you'd expect for a project of this type and age.\n\n"
-        "## Red Flags\nConcerning patterns: buzzword density vs substance, "
-        "unsubstantiated claims, marketing-to-code ratio, misleading scope, "
-        "abandoned maintenance. Say 'None found' if genuinely clean.\n\n"
-        "## What It Actually Is\nCut through any marketing to describe what this "
-        "project really does and how it works.\n\n"
-        "## Verdict\nOne sentence. Make it count.\n\n"
-        "---\n"
+        "You are a senior software engineering analyst. Produce a structured, "
+        "evidence-based repository assessment. Rules:\n"
+        "1. Every claim must reference specific data points from the metrics below.\n"
+        "2. Interpret what numbers mean — do not parrot them back.\n"
+        "3. Do not speculate beyond what the data supports.\n"
+        "4. Do not soften negative findings. Accuracy is the only priority.\n"
+        "5. Compare metrics against reasonable baselines for projects of similar "
+        "type, scope, and age.\n\n"
+        "Produce exactly these sections:\n\n"
+        "## Project Vitals\n"
+        "Assess project health across these dimensions (2-4 sentences total):\n"
+        "- **Sustainability**: Bus factor, contributor distribution, commit "
+        "cadence consistency (active weeks vs total span), trajectory "
+        "(accelerating, decelerating, or stalled)\n"
+        "- **Traction**: Stars and forks relative to age and project category; "
+        "watcher-to-star ratio as a genuine-interest signal; organic vs "
+        "campaign-driven growth patterns\n"
+        "- **Maturity**: Release discipline, versioning practices, license "
+        "presence, community health score interpreted in context\n\n"
+        "## Technical Assessment\n"
+        "Evaluate engineering rigor from observable artifacts (3-5 sentences):\n"
+        "- Does the repository structure reflect professional practices? "
+        "Evaluate presence or absence of tests, CI/CD, documentation, and "
+        "modular organization.\n"
+        "- Compare the project's stated scope and claims against actual "
+        "codebase size, language distribution, commit volume, and structural "
+        "complexity.\n"
+        "- Assess README substance: ratio of marketing language to actionable "
+        "technical content; unsubstantiated claims; whether examples match "
+        "stated capabilities.\n\n"
+        "## Risk Assessment\n"
+        "Identify concrete risks for someone considering adoption (2-4 sentences):\n"
+        "- **Maintenance**: Abandonment probability, bus factor implications, "
+        "issue backlog\n"
+        "- **Credibility**: Self-referential benchmarks, scope inflation, "
+        "claims without evidence\n"
+        "- **Operational**: Licensing gaps, missing versioned releases, absent "
+        "CI/CD, security posture\n\n"
+        "## Functional Summary\n"
+        "In 2-3 sentences, describe what this project technically does. Name "
+        "specific technologies, libraries, patterns, and architectural choices "
+        "evident in the data. Describe mechanisms, not aspirations.\n\n"
+        "## Verdict\n"
+        "One sentence. Maximum precision, no filler.\n\n"
+        "---\n\n"
+        "REPOSITORY DATA\n\n"
         f"Repo: {repo.get('full_name', '?')}\n"
         f"Description: {repo.get('description', 'none')}\n"
         f"Stars: {repo.get('stargazers_count', 0)} | "
@@ -330,12 +441,16 @@ def build_prompt(data):
         f"Age: {(now - created).days} days | "
         f"Last push: {(now - pushed).days} days ago\n"
         f"Commits: {commit_info}\n"
+        f"Commit cadence: {cadence_note}\n"
         f"Recent commit authors: {top_authors or 'unknown'}\n"
+        f"Bus factor: {bus_factor_note}\n"
         f"Languages: {lang_breakdown or 'none'}\n"
         f"License: {license_id}\n"
         f"Releases: {release_info}\n"
-        f"Community: {community_info}\n"
-        f"Archived: {repo.get('archived', False)}\n\n"
+        f"Community profile: {community_info}\n"
+        f"Archived: {repo.get('archived', False)}\n"
+        f"Structure signals: {'; '.join(structure_signals) if structure_signals else 'unavailable'}\n"
+        f"README hype analysis: {buzzword_note}\n\n"
         f"Top-level file tree:\n{tree_info}\n\n"
         f"{readme_section}"
     )
