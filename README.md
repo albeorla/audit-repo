@@ -3,7 +3,7 @@
 CLI tool that roasts GitHub repositories. Fetches quantitative metrics via `gh`, derives analytical signals (bus factor, commit cadence, README hype density), then sends everything to Claude for a structured, evidence-based assessment — rendered in the terminal with Rich.
 
 <p align="center">
-  <img src="repo-roast.png" alt="repo-roast demo" width="720">
+  <img src="examples/repo-roast.png" alt="repo-roast demo" width="720">
 </p>
 
 ## How it works
